@@ -1,0 +1,455 @@
+public class V_RedshiftCanonHelper {
+       
+    ////////////////////////////////////
+    ////////////////////////////////////
+    // AWS REDSHIFT CANONICAL REQUEST //
+    ////////////////////////////////////
+    ////////////////////////////////////
+    
+    // To begin the signing process, create a string that includes information 
+    // from your request in a standardized (canonical) format. 
+    // This ensures that when AWS receives the request, 
+    // it can calculate the same signature that you calculated.
+    
+    //	Constants that likely pertain to every request
+    private static final String 
+        MAC_ALGORITHM = 'hmacSHA256',
+        DIGEST_ALGORITHM = 'sha-256',
+        AMZ_ALGORITHM = 'AWS4-HMAC-SHA256',
+        METHOD = 'POST',
+        REGION = 'us-east-1',
+        SERVICE_CODE = 'redshift-data',
+        VERSION = '2010-05-08',
+        RESOURCE = '/';
+    
+    // variables to be set during instantiation,
+    // specific to each implementation
+    private final String 
+        A_KEY, 
+        S_KEY, 
+        ENDPOINT;
+    
+    // runtime vars
+    private DateTime requestTimestamp;
+    private String amzRequestDate,
+            	amzRequestDateTime,
+            	payloadString,
+                httpMethod,
+                canonicalUri,
+                canonicalQueryString,
+                canonicalHeaders,
+                signedHeaders,
+            	hashedPayload,
+                canonicalRequestString,
+                hashedCanonicalRequest,
+                credentialScope,
+                stringToSign,
+                calculatedSignature,
+                authorizationString,
+        		finalEndpoint;
+        
+    private Map<String, String> finalQueryParams, finalHeaderParams;
+    
+    public V_RedshiftCanonHelper(String aKey, String sKey, String endpoint){
+        this.A_KEY = aKey;
+        this.S_KEY = sKey;
+        this.ENDPOINT = endpoint;
+    }
+    
+    public HttpResponse send(Map<String, Map<String, String>> params, String payload) {
+        
+        requestTimestamp = DateTime.now();
+        amzRequestDate = requestTimestamp.formatGmt('yyyyMMdd');
+        amzRequestDateTime = requestTimestamp.formatGmt('yyyyMMdd\'T\'HHmmss\'Z\'');
+        
+        // clone incoming maps so they can be added onto throughout the request, if necessary.
+        finalQueryParams = params.get('queryParams').clone();
+        finalHeaderParams = params.get('headerParams').clone();
+                                            
+        finalHeaderParams.put('host', 'callout:Testing_Postman_API');
+        finalHeaderParams.put('x-amz-date', amzRequestDateTime);
+        
+        payloadString = payload;
+        System.debug('***payloadString: ' + payloadString);
+                
+        // *** https://docs.aws.amazon.com/general/latest/gr/create-signed-request.html#code-signing-examples
+        // I broke down the steps of the authorization per the guidelines provided in Amazon docs
+        
+        setCanonicalRequestString();
+        System.debug('***canonicalRequestString: \n' + canonicalRequestString);
+
+        setHashedCanonicalRequest();
+        // System.debug('***hashedCanonicalRequest: ' + hashedCanonicalRequest);
+        
+        setStringToSign();
+        System.debug('***stringToSign: \n' + stringToSign);
+        
+        setCalculatedSignature();
+        // System.debug('***calculatedSignature: ' + calculatedSignature);
+        
+        setAuthorizationString();
+        System.debug('***authorizationString: ' + authorizationString);
+        
+        // Auth header and endpoint are set in this method
+        // This takes into account any canonical headers
+        // that need to be created 
+        HttpRequest request = createAuthorizedRequest();
+        
+        request.setMethod(METHOD);
+        request.setBody(payloadString);
+        
+        // May want to delegate this to the createAuthorizedRequest method? 
+        for (String key : finalHeaderParams.keySet()){
+            request.setHeader(key, finalHeaderParams.get(key));
+        }
+        
+        System.debug('*******ENDPOINT: ' + request.getEndpoint());
+        
+        return new Http().send(request);
+    }
+    
+    ///////////////////////////////////////
+    ///////////////////////////////////////
+    //// UTILITY AND EXCEPTION METHODS ////
+    ///////////////////////////////////////
+    ///////////////////////////////////////
+    
+    public void setCanonicalRequestString(){
+	/*
+        1) Create Canonical Request
+        E.g.
+        
+        GET
+        /
+        Action=DescribeInstances&Version=2016-11-15
+        content-type:application/x-www-form-urlencoded; charset=utf-8
+        host:ec2.amazonaws.com
+        x-amz-date:20220830T123600Z
+        host;x-amz-date
+        e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        
+        1.1) HTTPMethod 
+        - GET, POST, etc
+        
+        1.2) CanonicalUri 
+        – The URI-encoded version of the absolute path component URL 
+        (everything between the host and the question mark character (?) 
+        that starts the query string parameters). If the absolute path is empty, 
+        use a forward slash character (/).
+        
+        1.3) CanonicalQueryString 
+        – The URL-encoded query string parameters, 
+        separated by ampersands (&). Percent-encode reserved characters, 
+        including the space character. Encode names and values separately. 
+        After encoding, sort the parameters alphabetically by key name. 
+        If there is no query string, use an empty string ("").
+        
+        1.4) CanonicalHeaders 
+        – The request headers and their values, separated by newline characters. 
+        Header names must use lowercase characters, must appear in alphabetical order, 
+        and must be followed by a colon (:). For the values, trim any leading or 
+        trailing spaces, convert sequential spaces to a single space, and 
+        separate the values for a multi-value header using commas.
+        
+        You must include the host header (HTTP/1.1) or the :authority header (HTTP/2), 
+        and any x-amz-* headers in the request. 
+        You can optionally include other standard headers in the request, such as content-type.
+        
+        1.5) SignedHeaders
+        – The list of headers that you included in CanonicalHeaders, 
+        separated by semicolons (;). This indicates which headers 
+        are part of the signing process. Header names must use lowercase 
+        characters and must appear in alphabetical order.
+        
+        1.6) HashedPayload
+        – A string created using the payload in the body of the 
+        HTTP request as input to a hash function. This string uses 
+        lowercase hexadecimal characters. If the payload is empty, 
+        use an empty string as the input to the hash function.
+	*/	
+        
+        hashedPayload = encodeStringAsHash(payloadString);
+        
+        // add to headers now so this will be included in the ordered header list
+        // as part of the signature
+        finalHeaderParams.put('x-amz-content-sha256', hashedPayload);
+        
+        httpMethod = METHOD;
+        canonicalUri = (RESOURCE == '/' ? RESOURCE : uriEncode(RESOURCE));
+        
+        // methods defined below
+        setQueryStringFromParams();
+        setCanonicalHeadersFromParams();
+        setSignedHeadersFromParams();    
+        
+        canonicalRequestString = String.join(new List<String>{
+            httpMethod,
+                canonicalUri,
+                canonicalQueryString,
+                canonicalHeaders,
+                signedHeaders, 
+                hashedPayload
+                }, '\n');
+    }
+            
+    public void setQueryStringFromParams(){
+        // shorthand for new List<String>(); 
+        // Internal architecture is the same for Arrays and Lists in Apex
+        String[] params = new String[0];
+        String[] keys = new List<String>(finalQueryParams.keySet());
+        
+        // keys must be SORTED in the canonical request string
+        // the sort method returns void so it can't be used in the loop or to assign to a list
+        keys.sort();
+        for(String key: keys) {
+            params.add(uriEncode(key)+'='+uriEncode(finalQueryParams.get(key)));
+        }
+        
+        canonicalQueryString = String.join(params, '&');
+    }
+    
+    public void setCanonicalHeadersFromParams(){
+        // create empty lists to add the headers for the canon and signed header strings separately
+        String[] headers = new String[0];
+        List<String> keys = new List<String>(finalHeaderParams.keySet());
+        
+        // keys must be SORTED in the canonical request string
+        // the sort method returns void so it can't be used in the loop or to assign to a list
+        keys.sort();
+        for(String key : keys) {
+            headers.add(key.toLowerCase()+':'+finalHeaderParams.get(key));
+        }
+        
+        canonicalHeaders = String.join(headers, '\n');
+    }
+    
+    public void setSignedHeadersFromParams(){
+        // create empty lists to add the headers for the canon and signed header strings separately
+        String[] headers = new String[0];
+        List<String> keys = new List<String>(finalHeaderParams.keySet());
+        
+        // keys must be SORTED in the canonical request string
+        // the sort method returns void so it can't be used in the loop or to assign to a list
+        keys.sort();
+        for(String key : keys) {
+            headers.add(key.toLowerCase());
+        }
+        
+        signedHeaders = String.join(headers, ';');
+    }
+    
+    public void setHashedCanonicalRequest(){
+    /*
+        *** 2) Create a hash of the canonical request (string)
+        
+        Create a hash (digest) of the canonical request using the same algorithm 
+        that you used to create the hash of the payload. The hash of the canonical request 
+        is a string of lowercase hexadecimal characters.
+        
+        The following is an example hashed canonical request.
+        
+        f536975d06c0309214f805bb90ccff089219ecd68b2577efef23edd43b7e1a59
+        
+    */
+        hashedCanonicalRequest = encodeStringAsHash(canonicalRequestString);
+    }
+    
+    public void setStringToSign(){
+    /*
+        *** 3) Create a string to sign the request
+        
+        Create a string by concatenating the following strings, separated by newline characters. 
+        Do not end this string with a newline character.
+        
+        Algorithm – The algorithm used to create the hash of the canonical request. 
+        For SHA-256, the algorithm is AWS4-HMAC-SHA256.
+        
+        RequestDateTime – The date and time used in the credential scope.
+        CredentialScope – The credential scope. This restricts the resulting signature 
+        // to the specified Region and service. The string has the following format: 
+        // YYYYMMDD/region/service/aws4_request.
+        
+        HashedCanonicalRequest – The hash of the canonical request.
+        
+        The following is an example string to sign.
+        
+        AWS4-HMAC-SHA256
+        20220830T123600Z
+        20220830/us-east-1/ec2/aws4_request
+        f536975d06c0309214f805bb90ccff089219ecd68b2577efef23edd43b7e1a59
+    
+    */                     
+        credentialScope = amzRequestDate + '/' + REGION + '/' + SERVICE_CODE + '/' + 'aws4_request';
+        
+        // bring it all together into 1 string with line breaks
+        stringToSign = String.join(new List<String>{
+            AMZ_ALGORITHM,
+                amzRequestDateTime,
+                credentialScope,
+                hashedCanonicalRequest
+                }, '\n');
+    }
+    
+    public void setCalculatedSignature(){
+    /*
+        *** 4) Calculate the signature
+        
+        After you create the string to sign, you are ready to calculate the signature 
+        for the authentication information that you'll add to your request. For each step, 
+        call the hash function with the required key and data.
+        
+        The result of each call to the hash function becomes the input for the next call to the hash function.
+        
+        Required input
+        
+        - A string, Key, that contains your secret access key
+        - A string, Date, that contains the date used in the credential scope, in the format YYYYMMDD
+        - A string, Region, that contains the Region code (for example, us-east-1)
+        - A string, Service, that contains the service code (for example, ec2)
+        
+        The string to sign that you created in the previous step.
+        
+        To calculate the signature
+        
+        Concatenate "AWS4" and the secret access key. Call the hash function with the 
+        concatenated string as the key and the date string as the data.
+        
+        kDate = hash("AWS4" + Key, Date)
+        kRegion = hash(kDate, Region)
+        kService = hash(kRegion, Service)
+        kSigning = hash(kService, "aws4_request")
+        
+        signature = hash(kSigning, string-to-sign)
+        
+        Convert the signature from binary to hexadecimal representation, 
+        in lowercase characters. The following is an example of a calculated signature.
+        
+        5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7
+    */            
+        // sign() defined below
+        Blob kDate = sign(Blob.valueOf('AWS4' + S_KEY), Blob.valueOf(amzRequestDate));
+        Blob kRegion = sign(kDate, Blob.valueOf(REGION));
+        Blob kService = sign(kRegion, Blob.valueOf(SERVICE_CODE));
+        Blob kSigning = sign(kService, Blob.valueOf('aws4_request'));
+        Blob blobToEncode = sign(kSigning, Blob.valueOf(stringToSign));
+        calculatedSignature = EncodingUtil.convertToHex(blobToEncode);
+    }
+    
+    // used for final signature
+    private static Blob sign(Blob key, Blob data){
+        return Crypto.generateMac(MAC_ALGORITHM, data, key);
+    }
+    
+    public void setAuthorizationString(){
+    /*
+    	*** 5) Add the authorization header with the signature included
+    */
+        
+        authorizationString = 
+            AMZ_ALGORITHM + 
+            ' Credential=' + A_KEY + '/' + credentialScope + 
+            ', SignedHeaders=' + signedHeaders + 
+            ', Signature=' + calculatedSignature;
+    }
+    
+    public HttpRequest createAuthorizedRequest(){
+        HttpRequest req = new HttpRequest();
+        
+        // req.setHeader('Authorization', authorizationString);
+        
+        if (canonicalQueryString != '') {
+            finalEndpoint = ENDPOINT + '?' + canonicalQueryString;
+        } else {
+            finalEndpoint = ENDPOINT;
+        }
+        
+        req.setEndpoint(finalEndpoint);
+        
+        return req;
+    }
+    
+    //	We have to replace ~ and " " correctly, or we'll break AWS on those two characters
+    public static String uriEncode(String value) {
+        return value == null ? null : EncodingUtil.urlEncode(value, 'utf-8').replaceAll('%7E','~').replaceAll('\\+','%20');
+    }
+    
+    //	We have to replace ~ and " " correctly, or we'll break AWS on those two characters
+    public static String encodeStringAsHash(String value) {
+        return EncodingUtil.convertToHex(
+                Crypto.generateDigest(DIGEST_ALGORITHM, Blob.valueOf(value))
+            );
+    }
+    //	Turns an Amazon exception into something we can present to the user/catch
+    //	AUSTIN - let's figure out why this guy used this - the O.G. Codelor
+    /*
+	public class ServiceException extends Exception {
+		public String Code, Message, Resource, RequestId;
+	
+		public ServiceException(Dom.XmlNode node) {
+			String ns = node.getNamespace();
+			Code = getChildNodeText(node, ns, 'Code');
+			Message = getChildNodeText(node, ns, 'Message');
+			Resource = getChildNodeText(node, ns, 'Resource');
+			RequestId = getChildNodeText(node, ns, 'RequestId');
+		}
+        
+        public String toString() {
+            return JSON.serialize(this);
+        }
+	}
+	*/
+    
+    /* OG Methods
+     * These methods came with the boilerplate code, but I have excluded them for testing purposes.
+    
+    //	Actually perform the request, and throw exception if response code is not valid
+    protected HttpResponse sendRequest(Set<Integer> validCodes) {
+    	HttpResponse response = new Http().send(createRequest());
+    	if(!validCodes.contains(response.getStatusCode())) {
+    		throw new ServiceException(response.getBodyDocument().getRootElement());
+    	}
+    	return response;
+	}
+	
+    //	Same as above, but assume that only 200 is valid
+    //	This method exists because most of the time, 200 is what we expect
+	protected HttpResponse sendRequest() {
+		return sendRequest(new Set<Integer> { 200 });
+	}
+    
+    //	XML Node utility methods that will help read elements
+    public static Boolean getChildNodeBoolean(Dom.XmlNode node, String ns, String name) {
+    	try {
+    		return Boolean.valueOf(node.getChildElement(name, ns).getText());
+    	} catch(Exception e) {
+    		return null;
+    	}
+    }
+    
+    public static DateTime getChildNodeDateTime(Dom.XmlNode node, String ns, String name) {
+    	try {
+    		return (DateTime)JSON.deserialize(node.getChildElement(name, ns).getText(), DateTime.class);
+    	} catch(Exception e) {
+    		return null;
+    	}
+    }
+    
+    public static Integer getChildNodeInteger(Dom.XmlNode node, String ns, String name) {
+    	try {
+    		return Integer.valueOf(node.getChildElement(name, ns).getText());
+    	} catch(Exception e) {
+    		return null;
+    	}
+    }
+    
+	public static String getChildNodeText(Dom.XmlNode node, String ns, String name) {
+		try {
+			return node.getChildElement(name, ns).getText();
+		} catch(Exception e) {
+			return null;
+		}
+	}
+	
+
+    */
+}
